@@ -696,3 +696,61 @@ pre.json-preview {
   margin-top: 5px;
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- 策略目标验证 ---- */
+.goal-panel h2 {
+  font-size: 15px;
+}
+
+.goal-form {
+  display: grid;
+  grid-template-columns: minmax(170px, 2fr) minmax(170px, 1.6fr) minmax(90px, 0.8fr) minmax(120px, 1.2fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin: 12px 0 14px;
+}
+
+.goal-form label > span {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+@media (max-width: 900px) {
+  .goal-form {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.notice.ok {
+  background: var(--ok-bg);
+  border: 1px solid rgba(54, 192, 138, 0.35);
+  color: #b8f0d8;
+}
+
+.goal-result .stats {
+  margin-bottom: 12px;
+}
+
+.goal-block-title {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 10px 0 6px;
+}
+
+.goal-proto-table th,
+.goal-proto-table td {
+  white-space: nowrap;
+}
+
+.goal-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.traffic-flow .spacer {
+  flex: 1;
+}

@@ -34,6 +34,16 @@ const PROTO_INDEX = new Map<Protocol, number[]>([
   ['ANY', [0, 1]],
 ])
 
+/** 协议维下标：TCP→[0]、UDP→[1]、ANY→[0,1]（ANY 同时占据两种具体协议） */
+export function protocolDimIndices(protocol: Protocol): number[] {
+  return PROTO_INDEX.get(protocol)!
+}
+
+/** 协议维下标 → 具体协议名（0→TCP，1→UDP） */
+export function concreteProtocolOf(dim: number): Exclude<Protocol, 'ANY'> {
+  return CONCRETE_PROTOCOLS[dim]
+}
+
 function makeId(): string {
   return Math.random().toString(36).slice(2, 10)
 }
@@ -41,6 +51,41 @@ function makeId(): string {
 // ---------------------------------------------------------------------------
 // 校验与规范化
 // ---------------------------------------------------------------------------
+
+/** 校验端口区间文本（规则与策略目标验证共用同一套校验与报错文案） */
+export function validatePortRange(
+  pStartText: string,
+  pEndText: string,
+): { portStart: number; portEnd: number; errors: string[] } {
+  const errors: string[] = []
+  let portStart = NaN
+  let portEnd = NaN
+  if (pStartText === '') {
+    errors.push('起始端口不能为空')
+  } else if (!/^\d+$/.test(pStartText)) {
+    errors.push('起始端口必须为整数')
+  } else {
+    portStart = Number(pStartText)
+    if (portStart < 0 || portStart > 65535) errors.push('起始端口必须在 0-65535 之间')
+  }
+  if (pEndText === '') {
+    errors.push('结束端口不能为空')
+  } else if (!/^\d+$/.test(pEndText)) {
+    errors.push('结束端口必须为整数')
+  } else {
+    portEnd = Number(pEndText)
+    if (portEnd < 0 || portEnd > 65535) errors.push('结束端口必须在 0-65535 之间')
+  }
+  if (
+    errors.length === 0 ||
+    (portStart >= 0 && portStart <= 65535 && portEnd >= 0 && portEnd <= 65535)
+  ) {
+    if (!Number.isNaN(portStart) && !Number.isNaN(portEnd) && portStart > portEnd) {
+      errors.push(`端口区间倒置：${portStart} > ${portEnd}`)
+    }
+  }
+  return { portStart, portEnd, errors }
+}
 
 export function validateRules(inputs: RuleInput[]): {
   valid: NormalizedRule[]
@@ -66,32 +111,10 @@ export function validateRules(inputs: RuleInput[]): {
 
     const pStartText = String(raw.portStart).trim()
     const pEndText = String(raw.portEnd).trim()
-    let portStart = NaN
-    let portEnd = NaN
-    if (pStartText === '') {
-      errors.push('起始端口不能为空')
-    } else if (!/^\d+$/.test(pStartText)) {
-      errors.push('起始端口必须为整数')
-    } else {
-      portStart = Number(pStartText)
-      if (portStart < 0 || portStart > 65535) errors.push('起始端口必须在 0-65535 之间')
-    }
-    if (pEndText === '') {
-      errors.push('结束端口不能为空')
-    } else if (!/^\d+$/.test(pEndText)) {
-      errors.push('结束端口必须为整数')
-    } else {
-      portEnd = Number(pEndText)
-      if (portEnd < 0 || portEnd > 65535) errors.push('结束端口必须在 0-65535 之间')
-    }
-    if (
-      errors.length === 0 ||
-      (portStart >= 0 && portStart <= 65535 && portEnd >= 0 && portEnd <= 65535)
-    ) {
-      if (!Number.isNaN(portStart) && !Number.isNaN(portEnd) && portStart > portEnd) {
-        errors.push(`端口区间倒置：${portStart} > ${portEnd}`)
-      }
-    }
+    const ports = validatePortRange(pStartText, pEndText)
+    const portStart = ports.portStart
+    const portEnd = ports.portEnd
+    errors.push(...ports.errors)
 
     let protocol: Protocol | null = null
     const protoUpper = raw.protocol.trim().toUpperCase()
@@ -202,21 +225,38 @@ function insertRange(atoms: Range[], lo: number, hi: number): Range[] {
   return next.sort((a, b) => a.start - b.start)
 }
 
-/** 由所有参与分析的规则 CIDR 构建 IP 原子空间。 */
-export function buildIpAtoms(rules: NormalizedRule[]): IpAtom[] {
+/**
+ * 由所有参与分析的规则 CIDR 构建 IP 原子空间。
+ * extra 可追加额外区间（如策略目标验证的目标 CIDR）：其边界同样参与切分，
+ * 保证目标边界即使落在规则原子块内部也能被精确切开。
+ */
+export function buildIpAtoms(
+  rules: NormalizedRule[],
+  extra: Range[] = [],
+): IpAtom[] {
   let atoms: Range[] = [{ start: 0, end: 0xffffffff }]
   for (const rule of rules) {
     atoms = insertRange(atoms, rule.ipStart, rule.ipEnd)
   }
+  for (const range of extra) {
+    atoms = insertRange(atoms, range.start, range.end)
+  }
   return atoms.map((a) => ({ ...a, prefix: atomPrefix(a.start, a.end) }))
 }
 
-/** 由所有端口区间构建端口原子段，边界取所有区间端点。 */
-export function buildPortAtoms(rules: NormalizedRule[]): PortAtom[] {
+/** 由所有端口区间构建端口原子段，边界取所有区间端点；extra 同 buildIpAtoms。 */
+export function buildPortAtoms(
+  rules: NormalizedRule[],
+  extra: Range[] = [],
+): PortAtom[] {
   const boundaries = new Set<number>([0, 65536])
   for (const rule of rules) {
     boundaries.add(rule.portStart)
     boundaries.add(rule.portEnd + 1)
+  }
+  for (const range of extra) {
+    boundaries.add(range.start)
+    boundaries.add(range.end + 1)
   }
   const points = [...boundaries].sort((a, b) => a - b)
   const atoms: PortAtom[] = []
@@ -227,7 +267,7 @@ export function buildPortAtoms(rules: NormalizedRule[]): PortAtom[] {
 }
 
 /** 二分查找落在 [lo, hi] 内的原子下标（原子与规则同维且已排序）。 */
-function containedIndices<T extends { start: number; end: number }>(
+export function containedIndices<T extends { start: number; end: number }>(
   atoms: T[],
   lo: number,
   hi: number,
@@ -275,9 +315,9 @@ export function buildOwnerMap(
 // 示例报文与区域合并
 // ---------------------------------------------------------------------------
 
-function exampleIp(atom: IpAtom): number {
+/** 原子块内的确定性代表地址：块内至少 4 个地址时取第 2 个，避免样例总是网络地址 */
+export function exampleIp(atom: IpAtom): number {
   const size = atom.end - atom.start + 1
-  // 块内至少 4 个地址时取第 2 个，避免样例总是网络地址
   return size >= 4 ? (atom.start + 1) >>> 0 : atom.start
 }
 
@@ -324,7 +364,7 @@ function mergeRanges(ranges: Array<{ start: number; end: number }>): Array<{
 }
 
 /** 合并相邻且构成规范 CIDR 的 IP 原子块 */
-function mergeIpAtoms(indices: number[], ipAtoms: IpAtom[]): string[] {
+export function mergeIpAtoms(indices: number[], ipAtoms: IpAtom[]): string[] {
   const sorted = [...new Set(indices)].sort((a, b) => ipAtoms[a].start - ipAtoms[b].start)
   const cidrs: string[] = []
   let i = 0
