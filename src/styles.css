@@ -696,3 +696,77 @@ pre.json-preview {
   margin-top: 5px;
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- 策略目标验证 ---- */
+.goal-form {
+  display: grid;
+  grid-template-columns: minmax(170px, 2fr) minmax(180px, 1.6fr) minmax(90px, 0.8fr) minmax(110px, 1.1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+@media (max-width: 900px) {
+  .goal-form {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.goal-field label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.goal-ports {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.goal-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.notice.success {
+  background: var(--ok-bg);
+  border: 1px solid rgba(54, 192, 138, 0.35);
+  color: #b9f0dc;
+}
+
+.violation-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+}
+
+.violation-card.unmatched {
+  border-left-color: var(--warn);
+}
+
+.violation-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.violation-title {
+  font-weight: 600;
+}
+
+.tag.other-action {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.tag.unmatched {
+  background: var(--warn-bg);
+  color: var(--warn);
+}

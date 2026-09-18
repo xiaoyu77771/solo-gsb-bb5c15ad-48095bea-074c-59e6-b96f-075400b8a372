@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { RuleTable } from './RuleTable'
 import { AuditResults } from './AuditResults'
+import { GoalPanel } from './GoalPanel'
 import { ImportModal, ExportModal } from './Modals'
 import { ReorderPreviewModal } from './ReorderPreviewModal'
 import { audit, exportReport, newRuleInput, parseRulesJson } from './audit/engine'
@@ -154,6 +155,16 @@ export default function App() {
         onReorder={requestReorder}
         onAdd={addRule}
       />
+
+      <div className="section-gap">
+        <h2>策略目标验证</h2>
+        <p className="legend" style={{ marginTop: -6, marginBottom: 10 }}>
+          给定目标报文空间与期望动作，按首命中语义对当前规则做一次只读验证：
+          目标空间被精确划分为符合期望、命中其他动作、未命中任何规则三类，
+          违规区域按实际动作汇总并给出可复现的代表报文与精确 CIDR / 端口区域。
+        </p>
+        <GoalPanel rules={rules} />
+      </div>
 
       <div className="section-gap">
         <h2>审计结果</h2>

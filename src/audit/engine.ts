@@ -27,8 +27,10 @@ import {
 import { formatCidr, intToIpv4, parseCidrStrict } from './iputil'
 
 const PROTOCOLS: Protocol[] = ['TCP', 'UDP', 'ANY']
-const CONCRETE_PROTOCOLS: Array<Exclude<Protocol, 'ANY'>> = ['TCP', 'UDP']
-const PROTO_INDEX = new Map<Protocol, number[]>([
+/** 具体协议（下标 0=TCP、1=UDP），目标验证与调序预览复用 */
+export const CONCRETE_PROTOCOLS: Array<Exclude<Protocol, 'ANY'>> = ['TCP', 'UDP']
+/** 协议 -> 具体协议下标列表（ANY 同时占据 TCP 与 UDP） */
+export const PROTO_INDEX = new Map<Protocol, number[]>([
   ['TCP', [0]],
   ['UDP', [1]],
   ['ANY', [0, 1]],
@@ -227,7 +229,7 @@ export function buildPortAtoms(rules: NormalizedRule[]): PortAtom[] {
 }
 
 /** 二分查找落在 [lo, hi] 内的原子下标（原子与规则同维且已排序）。 */
-function containedIndices<T extends { start: number; end: number }>(
+export function containedIndices<T extends { start: number; end: number }>(
   atoms: T[],
   lo: number,
   hi: number,
@@ -281,6 +283,11 @@ function exampleIp(atom: IpAtom): number {
   return size >= 4 ? (atom.start + 1) >>> 0 : atom.start
 }
 
+/** 目标验证复用：与示例报文选点规则一致的代表地址 */
+export function exampleIpOf(atom: IpAtom): number {
+  return exampleIp(atom)
+}
+
 function decodeKey(key: string): { ip: number; port: number; proto: number } {
   const [ip, port, proto] = key.split('.').map(Number)
   return { ip, port, proto }
@@ -323,8 +330,8 @@ function mergeRanges(ranges: Array<{ start: number; end: number }>): Array<{
   return merged
 }
 
-/** 合并相邻且构成规范 CIDR 的 IP 原子块 */
-function mergeIpAtoms(indices: number[], ipAtoms: IpAtom[]): string[] {
+/** 合并相邻且构成规范 CIDR 的 IP 原子块（目标验证复用） */
+export function mergeIpAtoms(indices: number[], ipAtoms: IpAtom[]): string[] {
   const sorted = [...new Set(indices)].sort((a, b) => ipAtoms[a].start - ipAtoms[b].start)
   const cidrs: string[] = []
   let i = 0

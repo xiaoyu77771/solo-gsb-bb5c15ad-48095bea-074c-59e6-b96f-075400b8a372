@@ -1,8 +1,9 @@
 /** 审计引擎自检：node --test 风格的轻量断言脚本（零额外依赖） */
 import assert from 'node:assert'
 import { audit, parseRulesJson, validateRules } from './audit/engine'
+import { verifyGoal } from './audit/goal'
 import { movedRules, previewReorder } from './audit/reorder'
-import type { RuleInput } from './audit/types'
+import type { GoalInput, RuleInput } from './audit/types'
 import { ipv4ToInt, parseCidrStrict } from './audit/iputil'
 
 let passed = 0
@@ -391,6 +392,243 @@ test('调序预览：未移动的规则也会被上移到其前面的规则遮�
   assert.equal(ch.packet.protocol, 'TCP')
   const ipNum = ipv4ToInt(ch.packet.srcIp)
   assert.ok(ipNum >= ipv4ToInt('192.168.0.0') && ipNum <= ipv4ToInt('192.168.255.255'))
+})
+
+// --- 策略目标验证 ---
+function goal(partial: Partial<GoalInput>): GoalInput {
+  return {
+    cidr: partial.cidr ?? '10.0.0.0/24',
+    portStart: partial.portStart ?? '0',
+    portEnd: partial.portEnd ?? '65535',
+    protocol: partial.protocol ?? 'ANY',
+    action: partial.action ?? 'allow',
+  }
+}
+
+/** 暴力首命中模拟：用于复核代表报文确实复现对应判定 */
+function firstHit(rules: RuleInput[], ip: string, port: number, proto: 'TCP' | 'UDP') {
+  const { valid } = validateRules(rules)
+  const ipNum = ipv4ToInt(ip)
+  for (const r of valid) {
+    const protoOk = r.protocol === 'ANY' || r.protocol === proto
+    if (protoOk && ipNum >= r.ipStart && ipNum <= r.ipEnd && port >= r.portStart && port <= r.portEnd) {
+      return r
+    }
+  }
+  return null
+}
+
+test('目标验证：全部符合期望时无违规', () => {
+  const rules = [rule({ name: 'A', cidr: '10.0.0.0/8', action: 'allow' })]
+  const res = verifyGoal(rules, goal({ cidr: '10.0.0.0/24', protocol: 'TCP', action: 'allow' }))
+  assert.equal(res.kind, 'ok')
+  if (res.kind !== 'ok') return
+  assert.equal(res.report.totalSize, 256 * 65536)
+  assert.equal(res.report.matchSize, res.report.totalSize)
+  assert.equal(res.report.matchRatio, 1)
+  assert.equal(res.report.otherSize, 0)
+  assert.equal(res.report.unmatchedSize, 0)
+  assert.equal(res.report.violations.length, 0)
+})
+
+test('目标验证：命中其他动作与未命中精确划分', () => {
+  const rules = [
+    rule({ name: 'ssh-deny', cidr: '10.0.0.0/25', portStart: '22', portEnd: '22', protocol: 'TCP', action: 'deny' }),
+  ]
+  const res = verifyGoal(
+    rules,
+    goal({ cidr: '10.0.0.0/24', portStart: '22', portEnd: '22', protocol: 'TCP', action: 'allow' }),
+  )
+  assert.equal(res.kind, 'ok')
+  if (res.kind !== 'ok') return
+  const r = res.report
+  assert.equal(r.totalSize, 256)
+  assert.equal(r.matchSize, 0)
+  assert.equal(r.otherSize, 128)
+  assert.equal(r.unmatchedSize, 128)
+  assert.equal(r.otherRatio, 0.5)
+  assert.equal(r.unmatchedRatio, 0.5)
+  assert.equal(r.violations.length, 2)
+
+  const deny = r.violations.find((v) => v.kind === 'other-action')!
+  assert.equal(deny.action, 'deny')
+  assert.equal(deny.size, 128)
+  assert.deepEqual(
+    deny.rules.map((s) => s.ruleName),
+    ['ssh-deny'],
+  )
+  // 精确区域：TCP 端口 22 × 10.0.0.0/25
+  assert.equal(deny.regions.length, 1)
+  assert.equal(deny.regions[0].protocol, 'TCP')
+  assert.equal(deny.regions[0].blocks.length, 1)
+  assert.equal(deny.regions[0].blocks[0].portStart, 22)
+  assert.equal(deny.regions[0].blocks[0].portEnd, 22)
+  assert.deepEqual(deny.regions[0].blocks[0].cidrs, ['10.0.0.0/25'])
+  assert.equal(deny.regions[0].blocks[0].size, 128)
+  // 代表报文可复现：命中 deny 规则
+  assert.equal(deny.example.srcIp, '10.0.0.1')
+  assert.equal(deny.example.srcPort, 22)
+  assert.equal(deny.example.protocol, 'TCP')
+  assert.equal(deny.exampleMatchedRule!.ruleName, 'ssh-deny')
+  assert.equal(firstHit(rules, deny.example.srcIp, 22, 'TCP')!.action, 'deny')
+
+  const miss = r.violations.find((v) => v.kind === 'unmatched')!
+  assert.equal(miss.size, 128)
+  assert.deepEqual(miss.regions[0].blocks[0].cidrs, ['10.0.0.128/25'])
+  assert.equal(miss.example.srcIp, '10.0.0.129')
+  assert.equal(miss.exampleMatchedRule, null)
+  assert.equal(firstHit(rules, miss.example.srcIp, 22, 'TCP'), null)
+})
+
+test('目标验证：目标边界落在原子块内部时正确切分', () => {
+  // 规则是整块 /8、全端口；目标的 IP 与端口边界都落在规则原子块内部
+  const rules = [rule({ name: 'A', cidr: '10.0.0.0/8', action: 'allow' })]
+  const res = verifyGoal(
+    rules,
+    goal({ cidr: '10.0.128.0/17', portStart: '100', portEnd: '199', protocol: 'ANY', action: 'deny' }),
+  )
+  assert.equal(res.kind, 'ok')
+  if (res.kind !== 'ok') return
+  const r = res.report
+  // 目标空间 = 2^15 IP × 100 端口 × 2 协议，全部命中 allow（≠ 期望 deny）
+  assert.equal(r.totalSize, 32768 * 100 * 2)
+  assert.equal(r.otherSize, r.totalSize)
+  assert.equal(r.matchSize, 0)
+  assert.equal(r.unmatchedSize, 0)
+  assert.equal(r.violations.length, 1)
+  const v = r.violations[0]
+  assert.equal(v.action, 'allow')
+  // 切分后的区域又精确合并回目标本身：TCP / UDP 各一块
+  assert.equal(v.regions.length, 2)
+  for (const g of v.regions) {
+    assert.equal(g.blocks.length, 1)
+    assert.deepEqual(g.blocks[0].cidrs, ['10.0.128.0/17'])
+    assert.equal(g.blocks[0].portStart, 100)
+    assert.equal(g.blocks[0].portEnd, 199)
+    assert.equal(g.blocks[0].size, 32768 * 100)
+    assert.equal(g.size, 32768 * 100)
+  }
+})
+
+test('目标验证：ANY 分别检查 TCP 与 UDP', () => {
+  const rules = [rule({ name: 'tcp-only', cidr: '10.0.0.0/24', protocol: 'TCP', action: 'allow' })]
+  const res = verifyGoal(rules, goal({ cidr: '10.0.0.0/24', protocol: 'ANY', action: 'allow' }))
+  assert.equal(res.kind, 'ok')
+  if (res.kind !== 'ok') return
+  const r = res.report
+  assert.equal(r.totalSize, 256 * 65536 * 2)
+  // TCP 全部符合，UDP 全部未命中
+  assert.equal(r.matchSize, 256 * 65536)
+  assert.equal(r.unmatchedSize, 256 * 65536)
+  assert.equal(r.matchRatio, 0.5)
+  assert.equal(r.unmatchedRatio, 0.5)
+  assert.equal(r.violations.length, 1)
+  const v = r.violations[0]
+  assert.equal(v.kind, 'unmatched')
+  assert.equal(v.regions.length, 1)
+  assert.equal(v.regions[0].protocol, 'UDP')
+  assert.equal(v.example.protocol, 'UDP')
+})
+
+test('目标验证：非法规则不参与验证', () => {
+  const rules = [
+    rule({ name: 'bad-cidr', cidr: '10.0.0.5/24', action: 'deny' }),
+    rule({ name: 'bad-port', cidr: '10.0.0.0/24', portStart: '99999', portEnd: '5', action: 'deny' }),
+  ]
+  const res = verifyGoal(rules, goal({ cidr: '10.0.0.0/24', protocol: 'TCP', action: 'allow' }))
+  assert.equal(res.kind, 'ok')
+  if (res.kind !== 'ok') return
+  const r = res.report
+  assert.equal(r.validRuleCount, 0)
+  assert.equal(r.invalidRuleCount, 2)
+  // 非法规则不提供任何命中：整个目标空间未命中
+  assert.equal(r.unmatchedSize, r.totalSize)
+  assert.equal(r.matchSize, 0)
+  assert.equal(r.otherSize, 0)
+})
+
+test('目标验证：非法目标给出错误而不执行', () => {
+  const rules = [rule({ name: 'A' })]
+  const bad1 = verifyGoal(rules, goal({ cidr: '10.0.0.1/24' }))
+  assert.equal(bad1.kind, 'invalid')
+  const bad2 = verifyGoal(rules, goal({ portStart: '443', portEnd: '80' }))
+  assert.equal(bad2.kind, 'invalid')
+  if (bad2.kind === 'invalid') assert.ok(bad2.errors.some((e) => e.includes('倒置')))
+  const bad3 = verifyGoal(rules, goal({ protocol: 'ICMP' }))
+  assert.equal(bad3.kind, 'invalid')
+  const bad4 = verifyGoal(rules, goal({ action: '  ' }))
+  assert.equal(bad4.kind, 'invalid')
+  const bad5 = verifyGoal(rules, goal({ cidr: '' }))
+  assert.equal(bad5.kind, 'invalid')
+})
+
+test('目标验证：多个其他动作分组且区域大小守恒', () => {
+  const rules = [
+    rule({ name: 'd', cidr: '10.0.0.0/25', action: 'deny' }),
+    rule({ name: 'r', cidr: '10.0.0.128/25', action: 'reject' }),
+  ]
+  const res = verifyGoal(rules, goal({ cidr: '10.0.0.0/24', protocol: 'ANY', action: 'allow' }))
+  assert.equal(res.kind, 'ok')
+  if (res.kind !== 'ok') return
+  const r = res.report
+  assert.equal(r.violations.length, 2)
+  // 两组等大，按动作名排序：deny 在 reject 前
+  assert.deepEqual(
+    r.violations.map((v) => v.action),
+    ['deny', 'reject'],
+  )
+  // 大小守恒：各类之和 = 目标空间；每组的区域块之和 = 组大小
+  assert.equal(r.matchSize + r.otherSize + r.unmatchedSize, r.totalSize)
+  for (const v of r.violations) {
+    const regionSum = v.regions.reduce(
+      (s, g) => s + g.blocks.reduce((x, b) => x + b.size, 0),
+      0,
+    )
+    assert.equal(regionSum, v.size)
+    assert.equal(v.size, 128 * 65536 * 2)
+  }
+})
+
+test('目标验证：代表报文可复现且落在目标空间内', () => {
+  const rules = [
+    rule({ name: 'web', cidr: '10.0.0.0/25', portStart: '80', portEnd: '80', protocol: 'TCP', action: 'deny' }),
+    rule({ name: 'dns', cidr: '10.0.0.0/24', portStart: '53', portEnd: '53', protocol: 'UDP', action: 'drop' }),
+    rule({ name: 'base', cidr: '10.0.0.0/24', action: 'allow' }),
+  ]
+  const g = goal({ cidr: '10.0.0.0/24', portStart: '0', portEnd: '1024', protocol: 'ANY', action: 'allow' })
+  const res = verifyGoal(rules, g)
+  assert.equal(res.kind, 'ok')
+  if (res.kind !== 'ok') return
+  const r = res.report
+  assert.ok(r.violations.length >= 2) // deny 组、drop 组（无未命中：base 兜底）
+  const targetIp = (ip: string) => {
+    const n = ipv4ToInt(ip)
+    return n >= ipv4ToInt('10.0.0.0') && n <= ipv4ToInt('10.0.0.255')
+  }
+  for (const v of r.violations) {
+    const p = v.example
+    assert.ok(targetIp(p.srcIp), `代表报文 ${p.srcIp} 应落在目标 CIDR 内`)
+    assert.ok(p.srcPort >= 0 && p.srcPort <= 1024, '代表报文端口应落在目标区间内')
+    const hit = firstHit(rules, p.srcIp, p.srcPort, p.protocol)
+    if (v.kind === 'unmatched') {
+      assert.equal(hit, null)
+    } else {
+      assert.ok(hit, '代表报文应命中某条规则')
+      assert.equal(hit!.action, v.action)
+      assert.equal(hit!.index, v.exampleMatchedRule!.ruleIndex)
+    }
+  }
+})
+
+test('目标验证：只读，不改动规则输入', () => {
+  const rules = [
+    rule({ name: 'A', cidr: '10.0.0.0/8', action: 'allow' }),
+    rule({ name: 'B', cidr: '10.0.0.0/16', action: 'deny' }),
+  ]
+  const snapshot = JSON.stringify(rules)
+  const res = verifyGoal(rules, goal({ cidr: '10.0.0.0/12', action: 'allow' }))
+  assert.equal(res.kind, 'ok')
+  assert.equal(JSON.stringify(rules), snapshot)
 })
 
 console.log(`\n全部 ${passed} 项测试通过 ✔`)

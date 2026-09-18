@@ -154,3 +154,93 @@ export interface AuditReport {
   stats: AuditStats
   entries: AuditResultEntry[]
 }
+
+// ---------------------------------------------------------------------------
+// 策略目标验证
+// ---------------------------------------------------------------------------
+
+/** 验证目标的原始输入（与 UI 表单对应，未校验） */
+export interface GoalInput {
+  cidr: string
+  portStart: string | number
+  portEnd: string | number
+  protocol: string
+  /** 期望动作（文本，与规则动作精确比较） */
+  action: string
+}
+
+/** 可复现的代表报文 */
+export interface GoalPacket {
+  srcIp: string
+  srcPort: number
+  protocol: Exclude<Protocol, 'ANY'>
+}
+
+/** 违规区域的精确矩形分解块：一个端口区间 × 一组合并后的规范 CIDR */
+export interface GoalRegionBlock {
+  portStart: number
+  portEnd: number
+  cidrs: string[]
+  /** 该块的报文空间大小（IP 数 × 端口数） */
+  size: number
+}
+
+/** 按协议分组的精确区域 */
+export interface GoalRegionGroup {
+  protocol: Exclude<Protocol, 'ANY'>
+  blocks: GoalRegionBlock[]
+  size: number
+}
+
+/** 造成某组违规的规则（按贡献单元数排序） */
+export interface GoalViolationRule {
+  ruleIndex: number
+  ruleName: string
+  cells: number
+}
+
+/** 一组违规：命中同一其他动作的流量，或未命中任何规则的流量 */
+export interface GoalViolation {
+  kind: 'other-action' | 'unmatched'
+  /** 实际命中的动作；未命中任何规则时为 null */
+  action: Action | null
+  /** 该组覆盖的报文空间大小 */
+  size: number
+  /** 占整个目标空间的比例 */
+  ratio: number
+  cells: number
+  /** 命中该动作的规则（未命中组为空） */
+  rules: GoalViolationRule[]
+  /** 精确 CIDR / 端口区域（按协议分组的矩形分解） */
+  regions: GoalRegionGroup[]
+  /** 可复现的代表报文 */
+  example: GoalPacket
+  /** 代表报文实际命中的规则（未命中组为 null） */
+  exampleMatchedRule: { ruleIndex: number; ruleName: string } | null
+}
+
+export interface GoalReport {
+  generatedAt: string
+  goal: {
+    cidrText: string
+    portStart: number
+    portEnd: number
+    protocol: Protocol
+    action: Action
+  }
+  /** 整个目标报文空间大小（IP 数 × 端口数 × 协议数） */
+  totalSize: number
+  matchSize: number
+  matchRatio: number
+  otherSize: number
+  otherRatio: number
+  unmatchedSize: number
+  unmatchedRatio: number
+  violations: GoalViolation[]
+  validRuleCount: number
+  invalidRuleCount: number
+}
+
+export type GoalVerification =
+  | { kind: 'ok'; report: GoalReport }
+  | { kind: 'invalid'; errors: string[] }

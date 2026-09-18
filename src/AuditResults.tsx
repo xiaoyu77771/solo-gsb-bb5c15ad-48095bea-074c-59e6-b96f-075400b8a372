@@ -5,6 +5,7 @@ import type {
   AuditReport,
   ExamplePacket,
 } from './audit/types'
+import { CopyButton } from './CopyButton'
 import { formatPacket, formatPercent, formatPortRange, formatSize } from './format'
 
 type Filter = 'all' | 'issues' | 'fully' | 'partial' | 'invalid' | 'reachable'
@@ -14,26 +15,6 @@ const STATUS_TEXT: Record<AuditEntry['status'], string> = {
   'partial-shadowed': '部分遮蔽',
   'fully-shadowed': '完全遮蔽',
   empty: '空区域',
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <button
-      className="copy-mini"
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text)
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1200)
-        } catch {
-          setCopied(false)
-        }
-      }}
-    >
-      {copied ? '已复制' : '复制'}
-    </button>
-  )
 }
 
 function PacketLine({ packet }: { packet: ExamplePacket }) {
